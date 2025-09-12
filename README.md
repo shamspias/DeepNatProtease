@@ -33,7 +33,7 @@ A modular pipeline for **AI‑assisted antiviral discovery**. It organizes curat
 
 ---
 
-## Architecture (Mermaid)
+## Architecture
 
 ```mermaid
 flowchart TB
