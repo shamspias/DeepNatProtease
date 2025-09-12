@@ -37,43 +37,43 @@ A modular pipeline for **AI‑assisted antiviral discovery**. It organizes curat
 
 ```mermaid
 flowchart TB
-    subgraph D[Data Layer]
-        D1[data/<virus>/train.csv]
-        D2[data/<virus>/val.csv]
-        D3[data/<virus>/test.csv]
-        L1[COCONUT_DB.sdf]
-    end
+  subgraph D[Data Layer]
+    D1["data/{virus}/train.csv"]
+    D2["data/{virus}/val.csv"]
+    D3["data/{virus}/test.csv"]
+    L1["COCONUT_DB.sdf"]
+  end
 
-    subgraph M[Modeling]
-        M1[ChemProp train per virus]
-        M2[Saved checkpoints<br/>models/<virus>/]
-        M3[Predict on COCONUT<br/>coconut_predictions.csv]
-    end
+  subgraph M[Modeling]
+    M1["ChemProp training (per virus)"]
+    M2["Saved checkpoints (models/{virus}/)"]
+    M3["Predict on COCONUT (coconut_predictions.csv)"]
+  end
 
-    subgraph A[Analysis & Triage]
-        A1[Top-N ranking<br/>top_1000_hits.csv]
-        A2[Cross-viral correlation<br/>cross_viral_correlation.png]
-        A3[Pan-viral hits<br/>pan_viral_hits.csv]
-    end
+  subgraph A[Analysis & Triage]
+    A1["Top-N ranking (top_1000_hits.csv)"]
+    A2["Cross-viral correlation (cross_viral_correlation.png)"]
+    A3["Pan-viral hits (pan_viral_hits.csv)"]
+  end
 
-    subgraph S[Structure-Based Stage]
-        S1[SMILES → 3D PDB (RDKit)]
-        S2[Vina config template<br/>docking/<virus>/vina_config.txt]
-        S3[Receptors (PDBQT)]
-    end
+  subgraph S[Structure-Based Stage]
+    S1["SMILES to 3D PDB (RDKit)"]
+    S2["Vina config (docking/{virus}/vina_config.txt)"]
+    S3["Receptors (PDBQT)"]
+  end
 
-    D1 --> M1
-    D2 --> M1
-    D3 --> M1
-    M1 --> M2
-    L1 --> M3
-    M2 --> M3
-    M3 --> A1
-    A1 --> S1
-    S1 --> S2
-    S2 -. uses .- S3
-    M3 --> A2
-    M3 --> A3
+  D1 --> M1
+  D2 --> M1
+  D3 --> M1
+  M1 --> M2
+  L1 --> M3
+  M2 --> M3
+  M3 --> A1
+  A1 --> S1
+  S1 --> S2
+  S2 -. uses .- S3
+  M3 --> A2
+  M3 --> A3
 ```
 
 ---
