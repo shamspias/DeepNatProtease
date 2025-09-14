@@ -1,9 +1,0 @@
-chemprop==1.5.2
-rdkit-pypi
-scikit-learn
-pandas
-numpy
-requests
-tqdm
-matplotlib
-seaborn
