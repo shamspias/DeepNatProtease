@@ -276,7 +276,7 @@ vina:
         sys.exit(1)
     else:
         print("\n✓ All systems ready!")
-        print("\nNext step: Run 03_define_targets.py to define viral targets")
+        print("\nNext step: Run data_collection/03_define_targets.py to define viral targets")
 
 
 if __name__ == "__main__":
