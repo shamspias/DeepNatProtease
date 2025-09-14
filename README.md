@@ -105,20 +105,20 @@ flowchart TB
   end
 
   subgraph Curate[Per-Virus Curation]
-    C1[Standardize molecules\n(SMILES/tautomers/salts)]
+    C1[Standardize molecules\n SMILES/tautomers/salts]
     C2[Harmonize units → nM]
-    C3[Define actives (thresholds)]
+    C3[Define actives thresholds]
     C4[De-duplicate + annotate provenance]
   end
 
   subgraph Splits[Leakage-Controlled Splits]
     S1[Bemis–Murcko scaffolds]
-    S2[Cluster (Tanimoto > 0.6)]
-    S3[Train/Val/Test (0.70/0.15/0.15)]
+    S2[Cluster Tanimoto > 0.6]
+    S3[Train/Val/Test 0.70/0.15/0.15]
   end
 
   subgraph Models[Per-Virus Modeling]
-    M1[ChemProp GNN (ensembles)]
+    M1[ChemProp GNN ensembles]
     M2[RF/XGBoost/LightGBM/DNN]
     M3[Evaluate on held-out scaffolds]
     M4[Select best per virus]
@@ -132,16 +132,16 @@ flowchart TB
   end
 
   subgraph Dock[Docking & Interactions]
-    D1[Protein prep (PDB → PDBQT)]
+    D1[Protein prep PDB → PDBQT]
     D2[Ligand 3D conformers]
-    D3[Docking (e.g., Vina/Glide)]
+    D3[Docking e.g., Vina/Glide]
     D4[Interaction fingerprints]
   end
 
   subgraph Rank[Prioritization & Reporting]
-    R1[Consensus score (ML ⨁ Dock ⨁ QED)]
+    R1[Consensus score ML ⨁ Dock ⨁ QED]
     R2[Per-virus ranked hits]
-    R3[Cross-virus signals (optional)]
+    R3[Cross-virus signals optional]
     R4[Figures & summaries]
   end
 
