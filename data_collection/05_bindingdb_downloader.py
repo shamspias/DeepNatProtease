@@ -1,403 +1,260 @@
 """
-BindingDB Data Download for Viral Proteases
-
-What this script does
----------------------
-1) Loads viral protease targets from configs/viral_targets.json (expects chembl_id and activity_threshold_nm).
-2) Attempts to download the current BindingDB "All" TSV (either .tsv.zip via /rwd/ or legacy .tsv.gz).
-3) Extracts the TSV in-memory and loads it with pandas.
-4) For each virus target, filters rows by its target ChEMBL ID, reshapes activity columns (Ki/Kd/IC50/EC50),
-   computes activity in nM and active/inactive (<= threshold), de-duplicates by SMILES+endpoint, and saves CSVs.
-5) Writes a JSON summary with native Python ints so json.dump works.
-
-Notes
------
-- BindingDB’s public “Download” links often route through a servlet/session. We try the direct static file
-  patterns that are commonly available:
-    * https://www.bindingdb.org/rwd/bind/downloads/BindingDB_All_YYYYMM_tsv.zip
-    * https://www.bindingdb.org/bind/downloads/BindingDB_All_YYYYMM_tsv.zip
-    * https://www.bindingdb.org/bind/downloads/BindingDB_All_YYYYmM.tsv.gz   (legacy)
-  If all fail, we fall back to a small synthetic sample dataframe so your pipeline still runs.
-
-- If you manually download the official TSV, you can place it under data/raw/BindingDB_All.tsv and the script
-  will use it directly (set USE_LOCAL_TSV=True).
-
-- Tested with pandas >= 1.5. If you see dtype warnings, they’re harmless for our use.
+Fast BindingDB extractor that stops after finding enough data
 """
 
 import json
-import gzip
-import io
+import pandas as pd
+from pathlib import Path
+from tqdm import tqdm
 import logging
 import warnings
-from datetime import datetime
-from pathlib import Path
-from typing import Dict, Optional, List
-
-import numpy as np
-import pandas as pd
-import requests
-import zipfile
+import time
+from typing_extensions import Dict
 
 warnings.filterwarnings("ignore")
 
-# --------------------------- Logging ---------------------------------
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler("logs/bindingdb_download.log"), logging.StreamHandler()],
+    handlers=[
+        logging.FileHandler("logs/bindingdb_download.log"),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
-# --------------------------- Config ----------------------------------
-CONFIG_PATH = "configs/viral_targets.json"
-OUTPUT_DIR = Path("data/activity")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-LOGS_DIR = Path("logs")
-LOGS_DIR.mkdir(exist_ok=True)
 
-# If you’ve downloaded the TSV yourself (unzipped), put it here:
-USE_LOCAL_TSV = False
-LOCAL_TSV_PATH = Path("data/raw/BindingDB_All.tsv")  # optional manual mode
+class FastBindingDBExtractor:
+    """Fast extraction with early stopping"""
 
+    def __init__(self, config_path: str = "configs/viral_targets.json"):
+        """Initialize extractor"""
+        self.targets = self._load_targets(config_path)
+        self.chunk_size = 10000
 
-# --------------------------- Helpers ---------------------------------
-def _build_candidate_urls(tag_yyyymm: str) -> List[Dict[str, str]]:
-    """
-    Build a list of candidate download URL patterns BindingDB uses.
-    We try modern TSV ZIP (with /rwd/) first, then non-/rwd/, then legacy .tsv.gz.
-    """
-    y = tag_yyyymm[:4]
-    mm = tag_yyyymm[4:]
-    m_no_zero = str(int(mm))  # e.g. "09" -> "9" for legacy m format
+        # SPEED OPTIMIZATIONS
+        self.max_rows_to_search = 1000000  # Stop after 1M rows (about 10 minutes)
+        self.min_compounds_needed = 500  # Stop if we find at least this many
+        self.max_compounds_needed = 5000  # Stop if we find this many
 
-    return [
-        {
-            "url": f"https://www.bindingdb.org/rwd/bind/downloads/BindingDB_All_{tag_yyyymm}_tsv.zip",
-            "type": "zip",
-        },
-        {
-            "url": f"https://www.bindingdb.org/bind/downloads/BindingDB_All_{tag_yyyymm}_tsv.zip",
-            "type": "zip",
-        },
-        {
-            "url": f"https://www.bindingdb.org/bind/downloads/BindingDB_All_{y}m{m_no_zero}.tsv.gz",
-            "type": "gz",
-        },
-    ]
+        # Simplified search patterns (faster)
+        self.search_patterns = {
+            'hiv1': ['HIV', 'immunodeficiency.*protease', 'HIV.*protease', 'P03366'],
+            'hcv': ['hepatitis C.*NS3', 'HCV.*NS3', 'HCV.*protease', 'P26662'],
+            'sars_cov2': ['SARS-CoV-2', 'COVID.*protease', 'coronavirus.*main', '3CL.*protease', 'Mpro'],
+            'dengue': ['dengue.*NS3', 'dengue.*protease', 'DENV.*NS3'],
+            'zika': ['zika.*NS3', 'zika.*protease', 'ZIKV.*NS3']
+        }
 
+    def _load_targets(self, config_path: str) -> Dict:
+        """Load viral target configuration"""
+        with open(config_path, 'r') as f:
+            return json.load(f)
 
-def _download_bindingdb_file() -> Optional[pd.DataFrame]:
-    """
-    Try to download BindingDB "All" TSV, handling either ZIP or GZ formats.
-    Returns a DataFrame or None if all attempts fail.
-    """
-    tag = datetime.utcnow().strftime("%Y%m")
-    candidates = _build_candidate_urls(tag)
+    def extract_virus_data_fast(self, virus_key: str, tsv_path: str) -> pd.DataFrame:
+        """
+        Fast extraction with early stopping
+        """
+        logger.info(f"Fast extraction for {virus_key}")
+        logger.info(f"Will stop after {self.max_rows_to_search:,} rows or {self.max_compounds_needed:,} compounds")
 
-    # Set a browser-like UA; some servers are picky.
-    headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) BindingDB-Downloader/1.0 (+https://example.org)"
-    }
+        patterns = self.search_patterns.get(virus_key, [])
+        if not patterns:
+            return pd.DataFrame()
 
-    for cand in candidates:
-        url = cand["url"]
-        ftype = cand["type"]
-        try:
-            logger.info(f"Downloading BindingDB from {url}")
-            with requests.get(url, headers=headers, stream=True, timeout=300) as r:
-                r.raise_for_status()
-                content = r.content
+        target_info = self.targets[virus_key]
+        threshold_nm = target_info['activity_threshold_nm']
 
-            if ftype == "zip":
-                with zipfile.ZipFile(io.BytesIO(content)) as zf:
-                    # Pick the first TSV member we find
-                    tsv_name = next((n for n in zf.namelist() if n.lower().endswith(".tsv")), None)
-                    if not tsv_name:
-                        raise ValueError("No .tsv file found inside ZIP")
-                    with zf.open(tsv_name) as fh:
-                        logger.info(f"Reading TSV from {tsv_name}")
-                        return pd.read_csv(fh, sep="\t", low_memory=False)
-            elif ftype == "gz":
-                with gzip.GzipFile(fileobj=io.BytesIO(content)) as gzfh:
-                    logger.info("Reading TSV from GZ")
-                    return pd.read_csv(gzfh, sep="\t", low_memory=False)
+        all_data = []
+        rows_searched = 0
+        start_time = time.time()
 
-        except Exception as ex:
-            logger.error(f"Error downloading BindingDB: {ex}")
+        # Build regex pattern once (faster than multiple searches)
+        import re
+        pattern = '|'.join(patterns)
+        regex = re.compile(pattern, re.IGNORECASE)
 
-    # As a last resort: if a local TSV is present and allowed, use it.
-    if USE_LOCAL_TSV and LOCAL_TSV_PATH.exists():
-        logger.info(f"Using local TSV at {LOCAL_TSV_PATH}")
-        try:
-            return pd.read_csv(LOCAL_TSV_PATH, sep="\t", low_memory=False)
-        except Exception as ex:
-            logger.error(f"Failed to read local TSV: {ex}")
+        with tqdm(desc=f"Fast search for {virus_key}", unit="rows") as pbar:
+            for chunk in pd.read_csv(tsv_path, sep='\t', chunksize=self.chunk_size,
+                                     low_memory=False, encoding='latin-1',
+                                     on_bad_lines='skip'):
 
-    # All attempts failed
-    return None
+                rows_searched += len(chunk)
+                pbar.update(len(chunk))
 
+                # Quick search - combine all text columns and search once
+                text_cols = chunk.select_dtypes(include=['object']).columns
 
-def _detect_target_chembl_col(df: pd.DataFrame) -> Optional[str]:
-    """
-    Detect the column name containing Target ChEMBL ID.
-    BindingDB has used variants like:
-        'Target ChEMBL ID', 'Target ChEMBL_ID', 'Target ChEMBLID'
-    """
-    candidates = [
-        "Target ChEMBL ID",
-        "Target ChEMBL_ID",
-        "Target ChEMBLID",
-        "Target_ChEMBL_ID",
-        "TargetChEMBLID",
-    ]
-    for c in candidates:
-        if c in df.columns:
-            return c
-    # Fallback heuristic: any column containing 'chembl' and 'target'
-    for c in df.columns:
-        lc = c.lower()
-        if "chembl" in lc and "target" in lc:
-            return c
-    return None
+                # Create combined text field for faster searching
+                combined_text = chunk[text_cols].fillna('').astype(str).apply(lambda x: ' '.join(x), axis=1)
 
+                # Single regex search
+                mask = combined_text.str.contains(regex, na=False)
 
-def _detect_smiles_col(df: pd.DataFrame) -> Optional[str]:
-    """
-    Detect a column with ligand SMILES.
-    Common: 'Ligand SMILES', sometimes just 'SMILES'.
-    """
-    candidates = ["Ligand SMILES", "SMILES", "Ligand_SMILES", "LigandSmiles"]
-    for c in candidates:
-        if c in df.columns:
-            return c
-    for c in df.columns:
-        if "smiles" in c.lower():
-            return c
-    return None
+                if mask.any():
+                    matches = chunk[mask]
 
+                    # Find SMILES column
+                    smiles_col = None
+                    for col in chunk.columns:
+                        if 'SMILES' in str(col).upper():
+                            smiles_col = col
+                            break
 
-def _present_activity_cols(df: pd.DataFrame) -> Dict[str, str]:
-    """
-    Return a mapping from BindingDB activity column -> standardized type.
-    Only include activity columns that actually exist in df.
-    """
-    mapping = {
-        "Ki (nM)": "Ki",
-        "Kd (nM)": "Kd",
-        "IC50 (nM)": "IC50",
-        "EC50 (nM)": "EC50",
-        # Sometimes without spaces:
-        "Ki(nM)": "Ki",
-        "Kd(nM)": "Kd",
-        "IC50(nM)": "IC50",
-        "EC50(nM)": "EC50",
-    }
-    return {col: std for col, std in mapping.items() if col in df.columns}
+                    if not smiles_col:
+                        continue
 
+                    # Process activity data
+                    activity_cols = ['Ki (nM)', 'IC50 (nM)', 'Kd (nM)', 'EC50 (nM)']
 
-def _create_sample_dataframe(targets: Dict[str, Dict]) -> pd.DataFrame:
-    """
-    Make a tiny dataframe resembling BindingDB_All.tsv so the rest of the pipeline can run.
-    We’ll create 5 rows for HIV1 (if present).
-    """
-    # Try to pick HIV-1 if exists, else any first target
-    hiv_key = None
-    for k in targets:
-        if k.lower().startswith("hiv"):
-            hiv_key = k
-            break
-    if hiv_key is None:
-        hiv_key = next(iter(targets.keys()))
+                    for _, row in matches.iterrows():
+                        smiles = row.get(smiles_col)
+                        if pd.isna(smiles) or not smiles:
+                            continue
 
-    chembl_id = targets[hiv_key]["chembl_id"]
+                        # Check activity columns
+                        for col in activity_cols:
+                            if col in row and pd.notna(row[col]):
+                                try:
+                                    value = float(row[col])
+                                    if value > 0:
+                                        all_data.append({
+                                            'canonical_smiles': smiles,
+                                            'standard_type': col.split()[0].replace('(', ''),
+                                            'standard_value': value,
+                                            'activity_nm': value,
+                                            'is_active': int(value <= threshold_nm),
+                                            'source': 'BindingDB'
+                                        })
+                                except:
+                                    continue
 
-    cols = [
-        "Target ChEMBL ID",
-        "Ligand SMILES",
-        "Ki (nM)",
-        "Kd (nM)",
-        "IC50 (nM)",
-        "EC50 (nM)",
-    ]
+                # Early stopping conditions
+                if len(all_data) >= self.max_compounds_needed:
+                    logger.info(f"✓ Found {len(all_data)} compounds - stopping (max reached)")
+                    break
 
-    rows = [
-        [chembl_id, "CCOC(=O)N1CCC(CC1)C2=NC=NC3=CC=CC=C23", 25.0, None, None, None],
-        [chembl_id, "CCN(CC)C(=O)N1CCC(CC1)C2=NC=NC3=CC=CC=C23", None, 50.0, None, None],
-        [chembl_id, "CCOC(=O)N1CCC(CC1)C2=NC(=NC3=CC=CC=C23)N", None, None, 120.0, None],
-        [chembl_id, "CCOC(=O)N1CCC(CC1)C2=NC(=NC3=CC=CC=C23)N", None, None, None, 80.0],
-        [chembl_id, "CC1=CC=CC=C1N2CCC(CC2)OC(=O)C", 5.0, 10.0, 15.0, 20.0],
-    ]
+                if rows_searched >= self.max_rows_to_search:
+                    logger.info(f"✓ Searched {rows_searched:,} rows - stopping (max rows reached)")
+                    break
 
-    df = pd.DataFrame(rows, columns=cols)
-    return df
+                # Log progress
+                if rows_searched % 100000 == 0:
+                    elapsed = time.time() - start_time
+                    rate = rows_searched / elapsed
+                    logger.info(f"  Progress: {rows_searched:,} rows, {len(all_data)} compounds, {rate:.0f} rows/sec")
 
+                    if len(all_data) >= self.min_compounds_needed:
+                        logger.info(f"✓ Found enough compounds ({len(all_data)}) - you can stop anytime")
 
-def _filter_and_shape_for_target(
-        df_all: pd.DataFrame, virus_key: str, targets: Dict[str, Dict]
-) -> pd.DataFrame:
-    """
-    For a single target:
-      - filter rows by its target_chembl_id,
-      - melt activity columns into (standard_type, standard_value),
-      - compute activity_nm (already in nM),
-      - label is_active by threshold,
-      - deduplicate by SMILES + endpoint.
-    """
-    target_info = targets[virus_key]
-    chembl_id = target_info["chembl_id"]
-    threshold_nm = float(target_info.get("activity_threshold_nm", 10000))
+        if not all_data:
+            return pd.DataFrame()
 
-    tcol = _detect_target_chembl_col(df_all)
-    if tcol is None:
-        logger.warning("Could not detect a 'Target ChEMBL ID' column in BindingDB TSV.")
-        return pd.DataFrame()
+        # Create DataFrame and remove duplicates
+        df = pd.DataFrame(all_data)
+        df = df.drop_duplicates(subset=['canonical_smiles', 'standard_type'], keep='first')
 
-    act_map = _present_activity_cols(df_all)
-    if not act_map:
-        logger.warning("No recognized activity columns (Ki/Kd/IC50/EC50) found in BindingDB TSV.")
-        return pd.DataFrame()
+        elapsed = time.time() - start_time
+        logger.info(f"Extraction complete in {elapsed:.1f} seconds")
+        logger.info(f"Found {len(df)} unique compounds for {virus_key}")
 
-    df = df_all[df_all[tcol] == chembl_id].copy()
-    if df.empty:
         return df
 
-    # Melt activity columns
-    id_cols = [c for c in df.columns if c not in act_map]
-    melted = df.melt(
-        id_vars=id_cols,
-        value_vars=list(act_map.keys()),
-        var_name="standard_type",
-        value_name="standard_value",
-    )
-    melted = melted.dropna(subset=["standard_value"])
-    if melted.empty:
-        return melted
+    def process_all_targets(self, output_dir: str = "data/activity") -> Dict:
+        """Process all viral targets with fast extraction"""
 
-    # Map 'Ki (nM)' -> 'Ki', etc., and coerce numeric
-    melted["standard_type"] = melted["standard_type"].map(act_map)
-    melted["activity_nm"] = pd.to_numeric(melted["standard_value"], errors="coerce")
-    melted = melted.dropna(subset=["activity_nm"])
-    if melted.empty:
-        return melted
+        # Find BindingDB file
+        tsv_files = list(Path("data/raw").glob("BindingDB_All*.tsv"))
+        if not tsv_files:
+            logger.error("No BindingDB file found")
+            return {}
 
-    # Label actives
-    melted["is_active"] = (melted["activity_nm"] <= threshold_nm).astype(int)
+        tsv_path = str(tsv_files[0])
+        logger.info(f"Using: {tsv_path}")
 
-    # SMILES column
-    smiles_col = _detect_smiles_col(melted)
-    if smiles_col:
-        melted = (
-            melted.sort_values("activity_nm")
-            .drop_duplicates(subset=[smiles_col, "standard_type"], keep="first")
-        )
+        results = {}
 
-    return melted
+        for virus_key in self.targets.keys():
+            logger.info(f"\n{'=' * 60}")
+            logger.info(f"Processing {virus_key.upper()}")
+            logger.info(f"{'=' * 60}")
 
+            try:
+                # Fast extraction
+                df = self.extract_virus_data_fast(virus_key, tsv_path)
 
-def _ensure_native_ints(obj):
-    """
-    Recursively convert NumPy scalars/ints/floats to native Python types.
-    Helps json.dump and keeps things consistent.
-    """
-    if isinstance(obj, dict):
-        return {k: _ensure_native_ints(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_ensure_native_ints(v) for v in obj]
-    # numpy to python
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
-    if isinstance(obj, (np.floating,)):
-        return float(obj)
-    return obj
+                if not df.empty:
+                    # Save to file
+                    output_path = Path(output_dir) / virus_key / "raw" / "bindingdb_data.csv"
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
 
+                    df.to_csv(output_path, index=False)
+                    logger.info(f"✓ Saved {len(df)} compounds to {output_path}")
 
-# --------------------------- Main downloader -------------------------
-def download_all_targets(output_dir: Path = OUTPUT_DIR, config_path: str = CONFIG_PATH) -> Dict[str, Dict]:
-    # Load targets config
-    with open(config_path, "r") as f:
-        targets: Dict[str, Dict] = json.load(f)
+                    results[virus_key] = {
+                        'total_compounds': len(df),
+                        'active_compounds': int(df['is_active'].sum()),
+                        'inactive_compounds': int((~df['is_active'].astype(bool)).sum()),
+                        'file_path': str(output_path)
+                    }
+                else:
+                    results[virus_key] = {
+                        'total_compounds': 0,
+                        'active_compounds': 0,
+                        'inactive_compounds': 0,
+                        'file_path': None
+                    }
 
-    # Try to download the BindingDB TSV
-    df_all = _download_bindingdb_file()
-    if df_all is None:
-        logger.warning("Could not download BindingDB; using sample dataframe for testing.")
-        df_all = _create_sample_dataframe(targets)
+            except Exception as e:
+                logger.error(f"Error processing {virus_key}: {str(e)}")
+                results[virus_key] = {'error': str(e)}
 
-    results: Dict[str, Dict] = {}
-
-    for virus_key in targets.keys():
-        logger.info(f"Processing {virus_key.upper()}")
-        df_target = _filter_and_shape_for_target(df_all, virus_key, targets)
-
-        # Save CSV if we have rows
-        if not df_target.empty:
-            out_path = output_dir / virus_key / "raw" / "bindingdb_data.csv"
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            df_target.to_csv(out_path, index=False)
-
-            total = int(len(df_target))
-            active = int(df_target["is_active"].sum())
-            inactive = int(total - active)
-
-            # activity type counts -> Python int
-            act_counts = df_target["standard_type"].value_counts()
-            act_counts = {k: int(v) for k, v in act_counts.items()}
-
-            results[virus_key] = {
-                "total_compounds": total,
-                "active_compounds": active,
-                "inactive_compounds": inactive,
-                "activity_types": act_counts,
-                "file_path": str(out_path),
-            }
-            logger.info(
-                f"Processed {total} unique compounds for {virus_key} "
-                f"(Active: {active}, Inactive: {inactive})"
-            )
-        else:
-            logger.warning(f"No data found for {virus_key}")
-            results[virus_key] = {
-                "total_compounds": 0,
-                "active_compounds": 0,
-                "inactive_compounds": 0,
-                "activity_types": {},
-                "file_path": None,
-            }
-
-    return results
-
-
-def print_summary(results: Dict[str, Dict]) -> None:
-    print("\n" + "=" * 60)
-    print("DOWNLOAD SUMMARY")
-    print("=" * 60)
-    for virus_key, stats in results.items():
-        print(f"\n{virus_key.upper()}:")
-        print(f"  Total compounds: {stats['total_compounds']}")
-        print(f"  Active: {stats['active_compounds']}")
-        print(f"  Inactive: {stats['inactive_compounds']}")
-        if stats.get("activity_types"):
-            print(f"  Activity types: {stats['activity_types']}")
+        return results
 
 
 def main():
+    """Main execution function"""
+
     print("=" * 60)
-    print("BindingDB Data Download for Viral Proteases")
+    print("BindingDB FAST Extraction")
+    print("Stops after finding enough data or 1M rows")
     print("=" * 60)
 
-    results = download_all_targets()
+    # Create directories
+    Path("logs").mkdir(exist_ok=True)
 
-    print_summary(results)
+    # Initialize extractor
+    extractor = FastBindingDBExtractor()
 
-    # Save summary as JSON (force native ints via default=int and pre-walk)
-    summary_path = OUTPUT_DIR / "bindingdb_download_summary.json"
-    with open(summary_path, "w") as f:
-        json.dump(_ensure_native_ints(results), f, indent=2, default=int)
-    logger.info(f"Summary saved to {summary_path}")
+    # Process all targets
+    start = time.time()
+    results = extractor.process_all_targets()
+    total_time = time.time() - start
 
-    print("\n✓ BindingDB download complete!")
-    print("Next step: continue with downstream processing.")
+    # Generate summary
+    print("\n" + "=" * 60)
+    print("EXTRACTION SUMMARY")
+    print("=" * 60)
+
+    for virus, stats in results.items():
+        if 'error' not in stats:
+            print(f"\n{virus.upper()}:")
+            print(f"  Total compounds: {stats['total_compounds']:,}")
+            if stats['total_compounds'] > 0:
+                print(f"  Active: {stats['active_compounds']:,}")
+                print(f"  Inactive: {stats['inactive_compounds']:,}")
+
+    print(f"\n✓ Total extraction time: {total_time / 60:.1f} minutes")
+
+    # Save summary
+    summary_path = "data/activity/bindingdb_summary.json"
+    with open(summary_path, 'w') as f:
+        json.dump(results, f, indent=2)
+    print(f"✓ Summary saved to {summary_path}")
+
+    print("\n✓ BindingDB extraction complete!")
+    print("\nNext: python data_collection/06_pubchem_downloader.py")
 
 
 if __name__ == "__main__":
