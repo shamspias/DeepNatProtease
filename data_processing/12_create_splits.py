@@ -1,6 +1,4 @@
-#!/usr/bin/env python3
 """
-12_create_splits.py
 Create scaffold-based train/validation/test splits for each virus dataset
 Ensures no data leakage by keeping similar scaffolds in the same split
 """
@@ -16,7 +14,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.cluster import MiniBatchKMeans
 from tqdm import tqdm
 import logging
-from typing import Dict, List, Tuple, Set
+from typing import Dict, List, Tuple, Set, Optional
 import warnings
 
 warnings.filterwarnings('ignore')
