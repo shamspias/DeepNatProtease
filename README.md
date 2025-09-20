@@ -226,3 +226,18 @@ docking workflows.
 
 For questions about data integration, modeling choices, or to report issues, please open a GitHub Issue or contact the
 corresponding author listed in the paper.
+
+
+## Issues
+Fix XGBoost OpenMP Issue (macOS):
+```shell
+# Install OpenMP for XGBoost
+brew install libomp
+
+# If that doesn't work, try reinstalling xgboost with conda:
+conda uninstall xgboost
+conda install -c conda-forge xgboost
+```
+
+
+

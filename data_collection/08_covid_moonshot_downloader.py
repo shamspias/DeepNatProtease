@@ -1,6 +1,6 @@
 """
-Download COVID Moonshot data - crowd-sourced SARS-CoV-2 Mpro inhibitors
-This is specifically for SARS-CoV-2 main protease
+Download COVID Moonshot data (SARS-CoV-2 specific crowd-sourced inhibitors)
+Fixed: JSON serialization for numpy types
 """
 
 import json
@@ -29,17 +29,18 @@ logger = logging.getLogger(__name__)
 
 
 class COVIDMoonshotDownloader:
-    """Download COVID Moonshot SARS-CoV-2 Mpro inhibitor data"""
+    """Download COVID Moonshot data for SARS-CoV-2 Mpro inhibitors"""
 
     def __init__(self, config_path: str = "configs/viral_targets.json"):
-        """Initialize COVID Moonshot downloader"""
+        """Initialize downloader"""
         self.targets = self._load_targets(config_path)
 
-        # COVID Moonshot data sources (as of 2025)
-        self.moonshot_urls = {
+        # COVID Moonshot URLs (updated for 2025)
+        self.urls = {
             'activity_data': 'https://covid.postera.ai/covid/activity_data.csv',
             'submissions': 'https://covid.postera.ai/covid/submissions.csv',
-            'experimental': 'https://github.com/postera-ai/COVID_moonshot_submissions/raw/main/covid_submissions_all_info.csv'
+            # Alternative/backup URLs
+            'github_backup': 'https://raw.githubusercontent.com/postera-ai/COVID_moonshot_submissions/master/covid_submissions_all_info.csv'
         }
 
     def _load_targets(self, config_path: str) -> Dict:
@@ -49,220 +50,192 @@ class COVIDMoonshotDownloader:
 
     def download_moonshot_data(self) -> pd.DataFrame:
         """
-        Download COVID Moonshot activity data
+        Download and process COVID Moonshot data
 
         Returns:
-            DataFrame with SARS-CoV-2 Mpro inhibitor data
+            DataFrame with standardized activity data
         """
+        logger.info("Downloading COVID Moonshot data for SARS-CoV-2")
+
         all_data = []
 
-        # Try to download activity data
-        for source_name, url in self.moonshot_urls.items():
-            logger.info(f"Downloading COVID Moonshot {source_name} from {url}")
+        # 1. Download activity data (primary source)
+        try:
+            logger.info(f"Downloading COVID Moonshot activity_data from {self.urls['activity_data']}")
+            response = requests.get(self.urls['activity_data'], timeout=30)
+            response.raise_for_status()
 
+            # Read CSV from response
+            import io
+            activity_df = pd.read_csv(io.StringIO(response.text))
+            logger.info(f"Downloaded {len(activity_df)} entries from activity_data")
+
+            # Process activity data
+            processed_activity = []
+            for _, row in tqdm(activity_df.iterrows(), total=len(activity_df), desc="Processing activity data"):
+                # Extract relevant fields
+                smiles = row.get('SMILES') or row.get('smiles') or row.get('canonical_smiles')
+
+                # Get activity values - COVID Moonshot uses different naming
+                ic50 = row.get('f_avg_IC50') or row.get('IC50_(nM)') or row.get('IC50_nM')
+                pIC50 = row.get('pIC50')
+
+                if smiles:
+                    # Validate SMILES
+                    mol = Chem.MolFromSmiles(smiles)
+                    if mol:
+                        # Convert pIC50 to IC50 if needed
+                        if pIC50 and pd.notna(pIC50) and not ic50:
+                            try:
+                                ic50 = 10 ** (9 - float(pIC50))  # Convert pIC50 to nM
+                            except:
+                                ic50 = None
+
+                        # Determine activity
+                        if ic50 and pd.notna(ic50):
+                            try:
+                                activity_nm = float(ic50)
+                                if activity_nm > 0:
+                                    processed_activity.append({
+                                        'canonical_smiles': smiles,
+                                        'standard_type': 'IC50',
+                                        'standard_value': activity_nm,
+                                        'activity_nm': activity_nm,
+                                        'is_active': int(activity_nm <= 1000),  # 1 µM threshold
+                                        'source': 'COVID_Moonshot_Activity',
+                                        'compound_id': row.get('CID') or row.get('compound_id') or row.get('TITLE', '')
+                                    })
+                            except:
+                                pass
+                        else:
+                            # If no IC50, treat as inactive (screening data)
+                            processed_activity.append({
+                                'canonical_smiles': smiles,
+                                'standard_type': 'Screening',
+                                'standard_value': 10000,
+                                'activity_nm': 10000,
+                                'is_active': 0,
+                                'source': 'COVID_Moonshot_Activity',
+                                'compound_id': row.get('CID') or row.get('compound_id') or row.get('TITLE', '')
+                            })
+
+            all_data.extend(processed_activity)
+            logger.info(f"Processed {len(processed_activity)} compounds from activity data")
+
+        except Exception as e:
+            logger.warning(f"Error downloading activity data: {str(e)}")
+
+        # 2. Download submissions data (additional compounds)
+        try:
+            logger.info(f"Downloading COVID Moonshot submissions from {self.urls['submissions']}")
+            response = requests.get(self.urls['submissions'], timeout=30)
+            response.raise_for_status()
+
+            # Read CSV from response
+            import io
+            submissions_df = pd.read_csv(io.StringIO(response.text))
+            logger.info(f"Downloaded {len(submissions_df)} entries from submissions")
+
+            # Process submissions (these are mostly untested compounds)
+            for _, row in submissions_df.iterrows():
+                smiles = row.get('SMILES') or row.get('smiles')
+
+                if smiles:
+                    # Validate SMILES
+                    try:
+                        mol = Chem.MolFromSmiles(str(smiles))
+                        if mol:
+                            # Submissions are generally untested, so mark as inactive
+                            all_data.append({
+                                'canonical_smiles': str(smiles),
+                                'standard_type': 'Submission',
+                                'standard_value': 10000,
+                                'activity_nm': 10000,
+                                'is_active': 0,
+                                'source': 'COVID_Moonshot_Submission',
+                                'compound_id': row.get('CID') or row.get('compound_id', '')
+                            })
+                    except:
+                        pass
+
+        except Exception as e:
+            logger.warning(f"Error downloading submissions: {str(e)}")
+
+        # 3. Try GitHub backup if needed
+        if len(all_data) < 100:  # If we have very little data, try backup
             try:
-                # Download CSV
-                df = pd.read_csv(url)
-                logger.info(f"Downloaded {len(df)} entries from {source_name}")
+                logger.info(f"Trying GitHub backup from {self.urls['github_backup']}")
+                response = requests.get(self.urls['github_backup'], timeout=30)
+                response.raise_for_status()
 
-                # Process based on source type
-                if source_name == 'activity_data':
-                    # Main activity data with IC50 values
-                    processed_df = self._process_activity_data(df)
-                elif source_name == 'submissions':
-                    # User submissions with predicted activities
-                    processed_df = self._process_submissions(df)
-                elif source_name == 'experimental':
-                    # Experimental validation data
-                    processed_df = self._process_experimental(df)
-                else:
-                    processed_df = pd.DataFrame()
+                import io
+                backup_df = pd.read_csv(io.StringIO(response.text))
 
-                if not processed_df.empty:
-                    all_data.append(processed_df)
+                for _, row in backup_df.iterrows():
+                    smiles = row.get('SMILES') or row.get('smiles')
+                    ic50 = row.get('IC50') or row.get('IC50_nM')
+
+                    if smiles:
+                        mol = Chem.MolFromSmiles(str(smiles))
+                        if mol:
+                            activity_nm = float(ic50) if ic50 and pd.notna(ic50) else 10000
+                            all_data.append({
+                                'canonical_smiles': str(smiles),
+                                'standard_type': 'IC50',
+                                'standard_value': activity_nm,
+                                'activity_nm': activity_nm,
+                                'is_active': int(activity_nm <= 1000),
+                                'source': 'COVID_Moonshot_GitHub',
+                                'compound_id': ''
+                            })
 
             except Exception as e:
-                logger.warning(f"Error downloading {source_name}: {e}")
-                continue
+                logger.warning(f"Error downloading from GitHub backup: {str(e)}")
 
         if not all_data:
-            logger.error("No COVID Moonshot data could be downloaded")
+            logger.warning("No COVID Moonshot data could be downloaded")
             return pd.DataFrame()
 
-        # Combine all sources
-        combined_df = pd.concat(all_data, ignore_index=True)
+        # Create DataFrame and remove duplicates
+        df = pd.DataFrame(all_data)
 
-        # Remove duplicates (keep most potent)
-        if 'activity_nm' in combined_df.columns:
-            combined_df = combined_df.sort_values('activity_nm')
-        combined_df = combined_df.drop_duplicates(subset=['canonical_smiles'], keep='first')
+        # Remove duplicates based on SMILES, keeping most potent
+        df = df.sort_values('activity_nm')
+        df = df.drop_duplicates(subset=['canonical_smiles'], keep='first')
 
-        logger.info(f"Total unique compounds from COVID Moonshot: {len(combined_df)}")
+        logger.info(f"Total unique compounds from COVID Moonshot: {len(df)}")
 
-        return combined_df
+        return df
 
-    def _process_activity_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Process the main activity data file
-
-        Args:
-            df: Raw activity data
-
-        Returns:
-            Processed DataFrame
-        """
-        processed_data = []
-
-        # Expected columns: SMILES, CDD_ID, f_avg_IC50, f_avg_pIC50, etc.
-        smiles_cols = [col for col in df.columns if 'SMILES' in col.upper()]
-        ic50_cols = [col for col in df.columns if 'IC50' in col.upper() and 'pIC50' not in col.upper()]
-
-        if not smiles_cols:
-            logger.warning("No SMILES column found in activity data")
-            return pd.DataFrame()
-
-        smiles_col = smiles_cols[0]
-
-        # Get SARS-CoV-2 threshold
-        sars_cov2_info = self.targets.get('sars_cov2', {})
-        threshold_nm = sars_cov2_info.get('activity_threshold_nm', 10000)
-
-        for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing activity data"):
-            smiles = row[smiles_col]
-
-            # Validate SMILES
-            mol = Chem.MolFromSmiles(smiles)
-            if not mol:
-                continue
-
-            canonical_smiles = Chem.MolToSmiles(mol, canonical=True)
-
-            # Extract IC50 if available
-            ic50_nm = None
-            for ic50_col in ic50_cols:
-                if pd.notna(row[ic50_col]):
-                    try:
-                        # Convert to nM if needed (often in uM)
-                        value = float(row[ic50_col])
-                        if 'uM' in ic50_col or value < 1000:  # Likely in uM
-                            ic50_nm = value * 1000
-                        else:
-                            ic50_nm = value
-                        break
-                    except (ValueError, TypeError):
-                        continue
-
-            # If no IC50, check for other activity indicators
-            if ic50_nm is None:
-                # Check if marked as active/inactive
-                if 'active' in row and pd.notna(row['active']):
-                    if row['active'] in [1, True, 'True', 'active']:
-                        ic50_nm = threshold_nm / 10  # Pseudo-active
-                    else:
-                        ic50_nm = threshold_nm * 10  # Pseudo-inactive
-                else:
-                    continue  # Skip if no activity info
-
-            processed_data.append({
-                'canonical_smiles': canonical_smiles,
-                'activity_nm': ic50_nm,
-                'is_active': int(ic50_nm <= threshold_nm),
-                'standard_type': 'IC50',
-                'standard_value': ic50_nm,
-                'source': 'COVID_Moonshot',
-                'assay_type': 'Mpro_enzymatic'
-            })
-
-        return pd.DataFrame(processed_data)
-
-    def _process_submissions(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Process user submission data
-
-        Args:
-            df: Raw submission data
-
-        Returns:
-            Processed DataFrame
-        """
-        processed_data = []
-
-        # Get SARS-CoV-2 threshold
-        sars_cov2_info = self.targets.get('sars_cov2', {})
-        threshold_nm = sars_cov2_info.get('activity_threshold_nm', 10000)
-
-        # Find SMILES column
-        smiles_cols = [col for col in df.columns if 'SMILES' in col.upper()]
-        if not smiles_cols:
-            return pd.DataFrame()
-
-        smiles_col = smiles_cols[0]
-
-        for _, row in df.iterrows():
-            smiles = row[smiles_col]
-
-            # Validate SMILES
-            mol = Chem.MolFromSmiles(smiles)
-            if not mol:
-                continue
-
-            canonical_smiles = Chem.MolToSmiles(mol, canonical=True)
-
-            # Submissions are potential hits, assign optimistic pseudo-activity
-            processed_data.append({
-                'canonical_smiles': canonical_smiles,
-                'activity_nm': threshold_nm * 2,  # Slightly inactive (unknown)
-                'is_active': 0,
-                'standard_type': 'predicted',
-                'standard_value': threshold_nm * 2,
-                'source': 'COVID_Moonshot_submission',
-                'assay_type': 'computational'
-            })
-
-        return pd.DataFrame(processed_data)
-
-    def _process_experimental(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Process experimental validation data
-
-        Args:
-            df: Raw experimental data
-
-        Returns:
-            Processed DataFrame
-        """
-        # Similar to activity data processing
-        return self._process_activity_data(df)
-
-    def process_for_virus(self, virus_key: str) -> pd.DataFrame:
+    def process_virus_data(self, virus_key: str) -> pd.DataFrame:
         """
         Process COVID Moonshot data for a specific virus
-        Only applicable for SARS-CoV-2
 
         Args:
             virus_key: Virus identifier
 
         Returns:
-            DataFrame with COVID Moonshot data or empty if not SARS-CoV-2
+            DataFrame with processed data
         """
-        if virus_key != 'sars_cov2':
+        # COVID Moonshot is only for SARS-CoV-2
+        if virus_key.lower() != 'sars_cov2':
             logger.info(f"COVID Moonshot data not applicable for {virus_key}")
             return pd.DataFrame()
 
-        logger.info("Downloading COVID Moonshot data for SARS-CoV-2")
-
-        # Download all COVID Moonshot data
         df = self.download_moonshot_data()
 
         if df.empty:
             return df
 
         # Add virus identifier
-        df['virus'] = virus_key
+        df['virus'] = 'sars_cov2'
 
         # Ensure required columns
-        if 'source' not in df.columns:
-            df['source'] = 'COVID_Moonshot'
+        target_info = self.targets.get('sars_cov2', {})
+        threshold_nm = target_info.get('activity_threshold_nm', 1000)
+
+        # Recalculate activity labels with virus-specific threshold
+        df['is_active'] = (df['activity_nm'] <= threshold_nm).astype(int)
 
         logger.info(f"Processed {len(df)} COVID Moonshot compounds for SARS-CoV-2")
         logger.info(f"Active compounds: {df['is_active'].sum()}")
@@ -272,53 +245,47 @@ class COVIDMoonshotDownloader:
 
     def download_all_targets(self, output_dir: str = "data/activity") -> Dict:
         """
-        Download COVID Moonshot data (only for SARS-CoV-2)
+        Process COVID Moonshot data for all viral targets
+        Note: Only SARS-CoV-2 will have data
         """
         results = {}
 
         for virus_key in self.targets.keys():
-            if virus_key != 'sars_cov2':
-                # Skip non-SARS-CoV-2 viruses
-                results[virus_key] = {
-                    'total_compounds': 0,
-                    'note': 'COVID Moonshot data only available for SARS-CoV-2'
-                }
-                continue
-
             logger.info(f"\n{'=' * 60}")
             logger.info(f"Processing COVID Moonshot data for {virus_key.upper()}")
             logger.info(f"{'=' * 60}")
 
-            try:
-                # Process COVID Moonshot data
-                df = self.process_for_virus(virus_key)
+            # Process data
+            df = self.process_virus_data(virus_key)
 
-                if not df.empty:
-                    # Save to file
-                    output_path = Path(output_dir) / virus_key / "raw" / "covid_moonshot_data.csv"
-                    output_path.parent.mkdir(parents=True, exist_ok=True)
+            if not df.empty:
+                # Save to file
+                output_path = Path(output_dir) / virus_key / "raw" / "covid_moonshot_data.csv"
+                output_path.parent.mkdir(parents=True, exist_ok=True)
 
-                    df.to_csv(output_path, index=False)
-                    logger.info(f"✓ Saved {len(df)} compounds to {output_path}")
+                df.to_csv(output_path, index=False)
+                logger.info(f"✓ Saved {len(df)} compounds to {output_path}")
 
-                    # Store results
-                    results[virus_key] = {
-                        'total_compounds': len(df),
-                        'active_compounds': df['is_active'].sum() if 'is_active' in df.columns else 0,
-                        'inactive_compounds': (~df['is_active'].astype(bool)).sum() if 'is_active' in df.columns else 0,
-                        'file_path': str(output_path)
-                    }
-                else:
+                # Convert numpy types to Python native types for JSON serialization
+                results[virus_key] = {
+                    'total_compounds': int(len(df)),
+                    'active_compounds': int(df['is_active'].sum()),
+                    'inactive_compounds': int((~df['is_active'].astype(bool)).sum()),
+                    'file_path': str(output_path)
+                }
+            else:
+                if virus_key.lower() == 'sars_cov2':
                     results[virus_key] = {
                         'total_compounds': 0,
                         'active_compounds': 0,
                         'inactive_compounds': 0,
-                        'file_path': None
+                        'file_path': None,
+                        'note': 'Failed to download data'
                     }
-
-            except Exception as e:
-                logger.error(f"Error processing {virus_key}: {str(e)}")
-                results[virus_key] = {'error': str(e)}
+                else:
+                    results[virus_key] = {
+                        'note': 'COVID Moonshot is SARS-CoV-2 specific'
+                    }
 
         return results
 
@@ -337,7 +304,7 @@ def main():
     # Initialize downloader
     downloader = COVIDMoonshotDownloader()
 
-    # Download all target data
+    # Download data for all targets (only SARS-CoV-2 will have data)
     results = downloader.download_all_targets()
 
     # Generate summary
@@ -345,25 +312,46 @@ def main():
     print("DOWNLOAD SUMMARY")
     print("=" * 60)
 
-    for virus, stats in results.items():
-        if 'error' not in stats:
-            if stats.get('total_compounds', 0) > 0:
-                print(f"\n{virus.upper()}:")
+    for virus in ['hiv1', 'hcv', 'sars_cov2', 'dengue', 'zika']:
+        virus_upper = virus.upper()
+        if virus in results:
+            stats = results[virus]
+            if 'total_compounds' in stats:
+                print(f"\n{virus_upper}:")
                 print(f"  Total compounds: {stats['total_compounds']:,}")
                 print(f"  Active: {stats['active_compounds']:,}")
                 print(f"  Inactive: {stats['inactive_compounds']:,}")
-            elif virus != 'sars_cov2':
-                print(f"\n{virus.upper()}: Not applicable (COVID Moonshot is SARS-CoV-2 specific)")
+            else:
+                print(f"\n{virus_upper}: {stats.get('note', 'No data')}")
 
-    # Save summary
+    # Save summary - ensure all values are JSON serializable
     summary_path = "data/activity/covid_moonshot_summary.json"
+
+    # Convert all numpy types to native Python types
+    json_safe_results = {}
+    for key, value in results.items():
+        if isinstance(value, dict):
+            json_safe_results[key] = {}
+            for k, v in value.items():
+                if isinstance(v, (np.integer, np.int64)):
+                    json_safe_results[key][k] = int(v)
+                elif isinstance(v, (np.floating, np.float64)):
+                    json_safe_results[key][k] = float(v)
+                elif isinstance(v, np.ndarray):
+                    json_safe_results[key][k] = v.tolist()
+                else:
+                    json_safe_results[key][k] = v
+        else:
+            json_safe_results[key] = value
+
     with open(summary_path, 'w') as f:
-        json.dump(results, f, indent=2)
+        json.dump(json_safe_results, f, indent=2)
+
     print(f"\n✓ Summary saved to {summary_path}")
 
     print("\n✓ COVID Moonshot download complete!")
-    print("\nNext step: Run data_collection/09_data_integration.py")
-    print("This will integrate all data sources (ChEMBL, BindingDB, PubChem, ZINC, COVID Moonshot)")
+    print("\nNote: COVID Moonshot data is specific to SARS-CoV-2 Mpro")
+    print("\nNext step: Run data_collection/09_data_integration.py to integrate all data sources")
 
 
 if __name__ == "__main__":

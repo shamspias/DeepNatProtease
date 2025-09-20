@@ -1,6 +1,6 @@
 """
 Create scaffold-based train/validation/test splits for each virus dataset
-Ensures no data leakage by keeping similar scaffolds in the same split
+Fixed: Added proper tqdm pandas integration
 """
 
 import json
@@ -13,6 +13,9 @@ from rdkit.Chem.Scaffolds import MurckoScaffold
 from sklearn.model_selection import train_test_split
 from sklearn.cluster import MiniBatchKMeans
 from tqdm import tqdm
+
+# Fix: Properly import and initialize tqdm pandas integration
+tqdm.pandas()
 import logging
 from typing import Dict, List, Tuple, Set, Optional
 import warnings
@@ -86,7 +89,7 @@ class ScaffoldSplitter:
         """
         logger.info(f"Creating scaffold-based splits for {len(df)} compounds")
 
-        # Extract scaffolds
+        # Extract scaffolds - Fixed: using progress_apply with tqdm.pandas()
         logger.info("Extracting molecular scaffolds...")
         df['scaffold'] = df[smiles_col].progress_apply(self.get_scaffold)
 
@@ -156,8 +159,9 @@ class ScaffoldSplitter:
 
         # Check class balance in each split
         for split_name, split_df in [('Train', train_df), ('Val', val_df), ('Test', test_df)]:
-            active_ratio = split_df['is_active'].mean()
-            logger.info(f"{split_name} - Active ratio: {active_ratio:.3f}")
+            if 'is_active' in split_df.columns:
+                active_ratio = split_df['is_active'].mean()
+                logger.info(f"{split_name} - Active ratio: {active_ratio:.3f}")
 
         return train_df, val_df, test_df
 
@@ -175,14 +179,14 @@ class ScaffoldSplitter:
         # First split off test set
         train_val_df, test_df = train_test_split(
             df, test_size=self.test_size, random_state=random_state,
-            stratify=df['is_active']
+            stratify=df['is_active'] if 'is_active' in df.columns else None
         )
 
         # Then split train_val into train and val
         relative_val_size = self.val_size / (self.train_size + self.val_size)
         train_df, val_df = train_test_split(
             train_val_df, test_size=relative_val_size, random_state=random_state,
-            stratify=train_val_df['is_active']
+            stratify=train_val_df['is_active'] if 'is_active' in train_val_df.columns else None
         )
 
         logger.info(f"Random split sizes - Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
@@ -306,27 +310,28 @@ class DataSplitCreator:
 
         logger.info(f"✓ Saved splits to {splits_dir}")
 
-        # Calculate statistics
+        # Calculate statistics - ensure all are native Python types
         stats = {
-            'total_compounds': len(df),
-            'train_size': len(train_df),
-            'val_size': len(val_df),
-            'test_size': len(test_df),
-            'train_active': train_df['is_active'].sum(),
-            'train_inactive': (~train_df['is_active'].astype(bool)).sum(),
-            'val_active': val_df['is_active'].sum(),
-            'val_inactive': (~val_df['is_active'].astype(bool)).sum(),
-            'test_active': test_df['is_active'].sum(),
-            'test_inactive': (~test_df['is_active'].astype(bool)).sum(),
-            'train_active_ratio': train_df['is_active'].mean(),
-            'val_active_ratio': val_df['is_active'].mean(),
-            'test_active_ratio': test_df['is_active'].mean()
+            'total_compounds': int(len(df)),
+            'train_size': int(len(train_df)),
+            'val_size': int(len(val_df)),
+            'test_size': int(len(test_df)),
+            'train_active': int(train_df['is_active'].sum()) if 'is_active' in train_df.columns else 0,
+            'train_inactive': int(
+                (~train_df['is_active'].astype(bool)).sum()) if 'is_active' in train_df.columns else 0,
+            'val_active': int(val_df['is_active'].sum()) if 'is_active' in val_df.columns else 0,
+            'val_inactive': int((~val_df['is_active'].astype(bool)).sum()) if 'is_active' in val_df.columns else 0,
+            'test_active': int(test_df['is_active'].sum()) if 'is_active' in test_df.columns else 0,
+            'test_inactive': int((~test_df['is_active'].astype(bool)).sum()) if 'is_active' in test_df.columns else 0,
+            'train_active_ratio': float(train_df['is_active'].mean()) if 'is_active' in train_df.columns else 0.0,
+            'val_active_ratio': float(val_df['is_active'].mean()) if 'is_active' in val_df.columns else 0.0,
+            'test_active_ratio': float(test_df['is_active'].mean()) if 'is_active' in test_df.columns else 0.0
         }
 
         if 'scaffold' in train_df.columns:
-            stats['train_scaffolds'] = train_df['scaffold'].nunique()
-            stats['val_scaffolds'] = val_df['scaffold'].nunique()
-            stats['test_scaffolds'] = test_df['scaffold'].nunique()
+            stats['train_scaffolds'] = int(train_df['scaffold'].nunique())
+            stats['val_scaffolds'] = int(val_df['scaffold'].nunique())
+            stats['test_scaffolds'] = int(test_df['scaffold'].nunique())
 
         return stats
 
