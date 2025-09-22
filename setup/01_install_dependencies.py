@@ -1,11 +1,11 @@
 """
-Install all required dependencies for the viral protease inhibitor discovery pipeline
-Updated for September 2025 - Using latest stable versions
+Install all required dependencies for viral protease discovery pipeline
+Updated: September 2025 - Latest stable versions
 """
 
 import subprocess
 import sys
-import os
+from pathlib import Path
 
 
 def install_package(package):
@@ -15,75 +15,65 @@ def install_package(package):
 
 def main():
     print("=" * 60)
-    print("Installing Dependencies for Viral Protease Discovery Pipeline")
-    print("Date: September 2025")
+    print("Installing Dependencies for Viral Protease Discovery")
+    print("Updated: September 22, 2025")
     print("=" * 60)
 
-    # Core scientific packages
+    # First, upgrade pip itself
+    print("\nUpgrading pip...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
+
+    # Core scientific packages (latest stable)
     core_packages = [
-        "numpy==1.26.4",
-        "pandas==2.2.2",
-        "scipy==1.13.1",
-        "scikit-learn==1.5.1",
-        "matplotlib==3.9.2",
-        "seaborn==0.13.2",
-        "tqdm==4.66.5"
+        "numpy==2.3.3",  # Latest NumPy 2.x
+        "pandas==2.3.2",  # Latest Pandas
+        "scipy==1.16.2",  # Latest SciPy
+        "scikit-learn==1.7.2",  # Latest sklearn
+        "matplotlib==3.10.6",  # Latest matplotlib
+        "seaborn==0.13.2",  # Latest seaborn
+        "tqdm==4.67.1",  # Progress bars
+        "joblib==1.5.2"  # Parallel processing
     ]
 
-    # Chemistry packages
+    # Chemistry packages (2025 versions)
     chemistry_packages = [
-        "rdkit==2024.03.5",  # Latest RDKit version as of 2025
-        "chembl-webresource-client==0.10.9",
-        "pubchempy==1.0.4",
-        "openbabel-wheel==3.1.1.2",
-        "mordred==1.2.0",  # Molecular descriptor calculator
-        "molvs==0.1.1"  # Molecule validation and standardization
+        "rdkit==2025.3.6",
+        "chembl-webresource-client==0.10.9",  # ChEMBL client
+        "pubchempy==1.0.5",  # PubChem API
+        "mordred==1.2.0",  # Molecular descriptors
+        "molvs==0.1.1"  # Molecule standardization
     ]
 
-    # Machine Learning packages (latest versions for 2025)
+    # Machine Learning packages (September 2025 latest)
     ml_packages = [
-        "torch==2.4.0",  # PyTorch latest stable
-        "torch-geometric==2.5.3",  # For graph neural networks
-        "torchvision==0.19.0",
-        "chemprop==2.0.3",  # Latest ChemProp for molecular property prediction
-        "xgboost==2.1.0",
-        "lightgbm==4.5.0",
-        "catboost==1.2.5",
-        "optuna==3.6.1",  # Hyperparameter optimization
-        "shap==0.45.1"  # Model interpretability
+        "torch==2.8.0",  # PyTorch latest stable
+        "torch-geometric==2.6.1",  # Graph neural networks
+        "xgboost==3.0.5",  # Latest XGBoost
+        "lightgbm==4.6.0",  # Latest LightGBM
+        "catboost==1.2.8",  # Latest CatBoost
+        "optuna==4.5.0",  # Hyperparameter optimization
+        "shap==0.48.0"  # Model interpretability
     ]
 
-    # Data handling and APIs
+    # Data handling
     data_packages = [
-        "requests==2.32.3",
-        "beautifulsoup4==4.12.3",
-        "lxml==5.2.2",
+        "requests==2.32.5",
+        "beautifulsoup4==4.13.5",
+        "lxml==6.0.1",
         "pyyaml==6.0.2",
-        "jsonschema==4.23.0",
-        "h5py==3.11.0",
-        "pyarrow==17.0.0",  # For efficient data storage
-        "fastparquet==2024.5.0"
-    ]
-
-    # Molecular docking and structural biology
-    docking_packages = [
-        "biopython==1.84",
-        "prody==2.4.1",
-        "meeko==0.5.0",  # AutoDock Vina tools
-        "plip==2.3.2",  # Protein-ligand interaction profiler
-        "pymol-open-source==3.0.0"  # For visualization
+        "h5py==3.14.0",
+        "pyarrow==21.0.0",
+        "openpyxl==3.1.5"  # Excel file support
     ]
 
     # Additional utilities
     utility_packages = [
-        "jupyterlab==4.2.4",
-        "notebook==7.2.1",
-        "ipywidgets==8.1.3",
-        "py3Dmol==2.3.0",  # 3D molecular visualization
-        "wandb==0.17.7",  # Experiment tracking
-        "rich==13.7.1",  # Beautiful terminal output
-        "click==8.1.7",  # CLI creation
-        "python-dotenv==1.0.1"
+        "jupyterlab==4.4.7",
+        "notebook==7.4.5",
+        "ipywidgets==8.1.7",
+        "python-dotenv==1.1.1",
+        "click==8.3.0",
+        "rich==14.1.0"  # Beautiful terminal output
     ]
 
     # Combine all packages
@@ -92,69 +82,59 @@ def main():
             chemistry_packages +
             ml_packages +
             data_packages +
-            docking_packages +
             utility_packages
     )
 
-    print("\nInstalling packages...")
-    print(f"Total packages to install: {len(all_packages)}\n")
+    print(f"\nInstalling {len(all_packages)} packages...")
 
     failed_packages = []
+    installed_packages = []
 
     for i, package in enumerate(all_packages, 1):
         try:
             print(f"[{i}/{len(all_packages)}] Installing {package}...")
             install_package(package)
-            print(f"✓ Successfully installed {package}")
+            installed_packages.append(package)
+            print(f"✓ {package}")
         except Exception as e:
-            print(f"✗ Failed to install {package}: {str(e)}")
+            print(f"✗ Failed: {package}")
             failed_packages.append(package)
 
-    # Install packages that require special handling
-    print("\n" + "=" * 60)
-    print("Installing special packages...")
-
-    # Install PyTorch with CUDA support if available
-    try:
-        import torch
-        if torch.cuda.is_available():
-            print("CUDA is available. PyTorch with CUDA support already installed.")
-        else:
-            print("CUDA not available. Using CPU version of PyTorch.")
-    except ImportError:
-        print("Installing PyTorch...")
-        subprocess.check_call([
-            sys.executable, "-m", "pip", "install",
-            "torch", "torchvision", "torchaudio",
-            "--index-url", "https://download.pytorch.org/whl/cpu"
-        ])
-
-    # Create requirements.txt for reproducibility
-    print("\n" + "=" * 60)
-    print("Creating requirements.txt file...")
-
+    # Create requirements.txt
+    print("\nCreating requirements.txt...")
     with open("requirements.txt", "w") as f:
         for package in all_packages:
             f.write(f"{package}\n")
 
-    print("✓ requirements.txt created successfully")
+    # Create project structure
+    print("\nCreating project directories...")
+    dirs_to_create = [
+        "data/raw",
+        "data/activity",
+        "data/natural/coconut",
+        "data/models",
+        "data/results",
+        "logs",
+        "configs"
+    ]
+
+    for dir_path in dirs_to_create:
+        Path(dir_path).mkdir(parents=True, exist_ok=True)
 
     # Summary
     print("\n" + "=" * 60)
     print("Installation Summary")
     print("=" * 60)
-    print(f"✓ Successfully installed: {len(all_packages) - len(failed_packages)} packages")
+    print(f"✓ Successfully installed: {len(installed_packages)}")
 
     if failed_packages:
-        print(f"✗ Failed installations: {len(failed_packages)} packages")
-        print("\nFailed packages:")
-        for package in failed_packages:
-            print(f"  - {package}")
-        print("\nPlease install these packages manually or check for compatibility issues.")
+        print(f"✗ Failed: {len(failed_packages)}")
+        for pkg in failed_packages:
+            print(f"  - {pkg}")
     else:
         print("\n✓ All packages installed successfully!")
 
-    print("\nNext step: Run 02_verify_installation.py to verify the installation")
+    print("\nNext: Run 03_define_targets.py")
 
 
 if __name__ == "__main__":
